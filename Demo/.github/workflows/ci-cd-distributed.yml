@@ -1,0 +1,135 @@
+name: CS420G Distributed CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main", "develop", "feature/*" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+    inputs:
+      simulate_fault:
+        description: 'Simulate Failure Scenario (1 to fail, 0 to pass)'
+        required: false
+        default: '0'
+
+jobs:
+  # ==========================================
+  # STAGE 1: KIỂM TRA TĨNH VÀ CÚ PHÁP PHÂN TÁN
+  # ==========================================
+  code-lint-and-syntax:
+    name: "Stage 1: Lint & Syntax Verification"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code (Git DAG)
+        uses: actions/checkout@v4
+
+      - name: Setup Python Environment
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Syntax Compilation Check
+        run: |
+          echo "[*] Checking Python syntax across all modules..."
+          python -m py_compile src/app.py tests/test_app.py
+          echo "[OK] Syntax check passed successfully on node: $HOSTNAME"
+
+  # ==========================================
+  # STAGE 2: KIỂM THỬ TỰ ĐỘNG PHÂN TÁN (PARALLEL MATRIX RUNNERS)
+  # ==========================================
+  distributed-matrix-tests:
+    name: "Stage 2: Distributed Test Matrix (Python ${{ matrix.python-version }} on ${{ matrix.os }})"
+    needs: [code-lint-and-syntax]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.11", "3.12"]
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Execute Distributed Unit Tests
+        env:
+          SIMULATE_FAIL: ${{ github.event.inputs.simulate_fault || '0' }}
+        run: |
+          echo "[*] Running automated test suite on Runner OS: ${{ matrix.os }}"
+          python -m unittest discover -s tests -p "test_*.py"
+
+  # ==========================================
+  # STAGE 3: ĐÓNG GÓI VÀ LƯU TRỮ ARTIFACT PHÂN TÁN
+  # ==========================================
+  package-and-build:
+    name: "Stage 3: Package & Upload Distributed Artifact"
+    needs: [distributed-matrix-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Create Build Metadata & Package
+        run: |
+          mkdir -p dist/
+          echo "Build Timestamp: $(date -u)" > dist/build_info.txt
+          echo "Commit Hash: ${{ github.sha }}" >> dist/build_info.txt
+          echo "Actor: ${{ github.actor }}" >> dist/build_info.txt
+          echo "Branch: ${{ github.ref }}" >> dist/build_info.txt
+          cp -r src dist/
+          tar -czf dist/cs420g-app-${{ github.sha }}.tar.gz src/ dist/build_info.txt
+          echo "[OK] Package created: dist/cs420g-app-${{ github.sha }}.tar.gz"
+
+      - name: Upload Distributed Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-distribution-${{ github.sha }}
+          path: dist/
+          retention-days: 7
+
+  # ==========================================
+  # STAGE 4: TRIỂN KHAI TỰ ĐỘNG LÊN MÔI TRƯỜNG THỬ NGHIỆM (STAGING)
+  # ==========================================
+  deploy-to-staging:
+    name: "Stage 4: Automated Deploy to Staging Cluster"
+    needs: [package-and-build]
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Download Build Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: app-distribution-${{ github.sha }}
+          path: deploy_staging/
+
+      - name: Deploy Simulation & Health Check
+        run: |
+          echo "[*] Connecting to Staging Node (Docker Host / Cloud Agent)..."
+          echo "[*] Unpacking release package..."
+          cat deploy_staging/build_info.txt
+          echo "[*] Triggering container restart & healthprobe..."
+          echo "[OK] Staging deployment completed successfully. Health check: 200 OK."
+
+  # ==========================================
+  # STAGE 5: TRIỂN KHAI PRODUCTION (QUALITY GATE & MAIN BRANCH ONLY)
+  # ==========================================
+  deploy-to-production:
+    name: "Stage 5: Production Deployment (Quality Gate Protected)"
+    needs: [deploy-to-staging]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+    steps:
+      - name: Production Deployment
+        run: |
+          echo "================================================="
+          echo "[!] QUALITY GATE PASSED: Code verified and merged to MAIN."
+          echo "[*] Deploying to Distributed Production Cluster..."
+          echo "[OK] Production is now LIVE at version: ${{ github.sha }}"
+          echo "================================================="
+

@@ -1,0 +1,81 @@
+# ===================================================================
+# GitLab CI/CD Distributed Pipeline Configuration
+# Môn học: Hệ phân tán (CS420G) - Mã đề tài: 01CS420 (GitHub & GitLab)
+# ===================================================================
+
+stages:
+  - lint
+  - test
+  - package
+  - staging
+  - production
+
+variables:
+  PYTHON_VERSION: "3.11"
+  APP_ENV: "distributed-test"
+
+default:
+  image: python:3.11-slim
+
+# STAGE 1: LINT VÀ KIỂM TRA CÚ PHÁP
+job_lint:
+  stage: lint
+  script:
+    - echo "[*] GitLab Runner: Checking syntax and coding conventions..."
+    - python -m py_compile src/app.py tests/test_app.py
+    - echo "[OK] Syntax check passed on runner $CI_RUNNER_ID"
+
+# STAGE 2: KIỂM THỬ TỰ ĐỘNG PHÂN TÁN (PARALLEL RUNNERS)
+job_test_node_1:
+  stage: test
+  script:
+    - echo "[*] GitLab Runner Node A: Running core test suite..."
+    - python -m unittest tests/test_app.py
+
+job_test_node_2:
+  stage: test
+  script:
+    - echo "[*] GitLab Runner Node B: Running fault tolerance & edge case tests..."
+    - python -m unittest tests/test_fault_scenario.py
+
+# STAGE 3: ĐÓNG GÓI VÀ TẠO ARTIFACT PHÂN TÁN
+job_package:
+  stage: package
+  script:
+    - mkdir -p dist/
+    - echo "Pipeline ID: $CI_PIPELINE_ID" > dist/release_info.txt
+    - echo "Commit: $CI_COMMIT_SHA" >> dist/release_info.txt
+    - echo "Branch: $CI_COMMIT_REF_NAME" >> dist/release_info.txt
+    - tar -czf dist/app-release-$CI_COMMIT_SHORT_SHA.tar.gz src/ dist/release_info.txt
+  artifacts:
+    name: "gitlab-artifact-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - dist/
+    expire_in: 1 week
+
+# STAGE 4: TRIỂN KHAI STAGING
+job_deploy_staging:
+  stage: staging
+  environment:
+    name: staging
+    url: http://staging.internal.cs420g.local
+  script:
+    - echo "[*] GitLab Runner: Auto-deploying to Staging Cluster..."
+    - cat dist/release_info.txt
+    - echo "[OK] Deployed to Staging successfully."
+
+# STAGE 5: TRIỂN KHAI PRODUCTION (QUALITY GATE)
+job_deploy_production:
+  stage: production
+  environment:
+    name: production
+    url: http://production.cs420g.local
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual # Yêu cầu phê duyệt (Manual Approval)
+  script:
+    - echo "=========================================================="
+    - echo "[*] Quality Gate Approved! Deploying release to Production"
+    - echo "[OK] System is healthy and serving requests."
+    - echo "=========================================================="
+
